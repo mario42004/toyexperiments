@@ -6,7 +6,9 @@ import os
 import re
 import random
 import argparse
+import math
 import unicodedata
+from collections import Counter
 from pathlib import Path
 from typing import List, Dict
 
@@ -193,6 +195,107 @@ def normative_columns(text: str) -> Dict[str, str]:
     }
 
 
+def select_k_medoids_paragraphs(paragraphs: List[str], k: int = 24, seed: int = 42) -> List[str]:
+    """Selecciona K parrafos representativos con una aproximacion ligera a K-Medoids."""
+    if not paragraphs:
+        return []
+    if k <= 0:
+        k = 1
+    if len(paragraphs) <= k:
+        return paragraphs
+
+    vectors = tfidf_vectors(paragraphs)
+    distances = cosine_distance_matrix(vectors)
+    medoid_indices = initialize_medoids(distances, k)
+    medoid_indices = improve_medoids(distances, medoid_indices, max_iter=5)
+    return [paragraphs[idx] for idx in medoid_indices]
+
+
+def tokenize_for_tfidf(text: str) -> List[str]:
+    normalized = normalize_for_keywords(text)
+    return re.findall(r"\b[a-z0-9]{3,}\b", normalized)
+
+
+def tfidf_vectors(texts: List[str]) -> List[Dict[str, float]]:
+    tokenized = [tokenize_for_tfidf(text) for text in texts]
+    doc_freq = Counter()
+    for tokens in tokenized:
+        doc_freq.update(set(tokens))
+
+    total_docs = len(texts)
+    vectors = []
+    for tokens in tokenized:
+        counts = Counter(tokens)
+        total_terms = sum(counts.values()) or 1
+        vector = {}
+        for token, count in counts.items():
+            tf = count / total_terms
+            idf = math.log((1 + total_docs) / (1 + doc_freq[token])) + 1
+            vector[token] = tf * idf
+        norm = math.sqrt(sum(value * value for value in vector.values())) or 1
+        vectors.append({token: value / norm for token, value in vector.items()})
+    return vectors
+
+
+def cosine_distance(vec_a: Dict[str, float], vec_b: Dict[str, float]) -> float:
+    if len(vec_a) > len(vec_b):
+        vec_a, vec_b = vec_b, vec_a
+    similarity = sum(value * vec_b.get(token, 0.0) for token, value in vec_a.items())
+    return 1.0 - similarity
+
+
+def cosine_distance_matrix(vectors: List[Dict[str, float]]) -> List[List[float]]:
+    size = len(vectors)
+    distances = [[0.0] * size for _ in range(size)]
+    for i in range(size):
+        for j in range(i + 1, size):
+            distance = cosine_distance(vectors[i], vectors[j])
+            distances[i][j] = distance
+            distances[j][i] = distance
+    return distances
+
+
+def initialize_medoids(distances: List[List[float]], k: int) -> List[int]:
+    total_distances = [sum(row) for row in distances]
+    medoids = [min(range(len(distances)), key=lambda idx: total_distances[idx])]
+    while len(medoids) < k:
+        candidates = [idx for idx in range(len(distances)) if idx not in medoids]
+        next_medoid = max(candidates, key=lambda idx: min(distances[idx][m] for m in medoids))
+        medoids.append(next_medoid)
+    return medoids
+
+
+def medoid_cost(distances: List[List[float]], medoids: List[int]) -> float:
+    return sum(min(row[medoid] for medoid in medoids) for row in distances)
+
+
+def improve_medoids(distances: List[List[float]], medoids: List[int], max_iter: int = 5) -> List[int]:
+    medoids = list(medoids)
+    best_cost = medoid_cost(distances, medoids)
+    all_indices = set(range(len(distances)))
+
+    for _ in range(max_iter):
+        improved = False
+        non_medoids = sorted(all_indices.difference(medoids))
+        for medoid in list(medoids):
+            medoid_position = medoids.index(medoid)
+            for candidate in non_medoids:
+                trial = list(medoids)
+                trial[medoid_position] = candidate
+                cost = medoid_cost(distances, trial)
+                if cost < best_cost:
+                    medoids = trial
+                    best_cost = cost
+                    improved = True
+                    break
+            if improved:
+                break
+        if not improved:
+            break
+
+    return sorted(medoids)
+
+
 def write_xlsx(path: str, header: List[str], rows: List[List]):
     """Escribe una hoja Excel simple con cabecera y filas."""
     wb = Workbook()
@@ -236,9 +339,9 @@ def elbow_curve(D: np.ndarray, max_k: int = 12, seed: int = 42) -> Dict[int, flo
 # MAIN
 # --------------------------
 def main():
-    parser = argparse.ArgumentParser(description="Clustering de oraciones/párrafos con BERT + K-Medoids")
+    parser = argparse.ArgumentParser(description="Seleccion de parrafos representativos con K-Medoids y etiquetado normativo")
     parser.add_argument("--file", type=str, required=True, help="Ruta al archivo .txt")
-    parser.add_argument("--k", type=int, default=25, help="Número de clusters (K-Medoids)")
+    parser.add_argument("--k", type=int, default=24, help="Numero de parrafos representativos que quieres obtener")
     parser.add_argument("--max_k", type=int, default=35, help="Máximo K para el elbow")
     parser.add_argument("--model", type=str, default=DEFAULT_MODEL, help="Modelo BERT de Transformers")
     parser.add_argument("--seed", type=int, default=42, help="Semilla aleatoria")
@@ -256,12 +359,14 @@ def main():
     # --- Lectura y segmentación ---
     text = read_txt_file(args.file)
     items = split_sentences_or_paragraphs(text)
+    selected_items = select_k_medoids_paragraphs(items, k=args.k, seed=args.seed)
     print(f"Total de oraciones/parrafos detectados: {len(items)}")
+    print(f"Parrafos representativos seleccionados (K): {len(selected_items)}")
 
     # --- Archivo madre: parrafos completos + etiquetas normativas ---
     master_xlsx = os.path.join(args.save_dir, f"{base_name}_archivo_madre_etiquetado.xlsx")
     master_rows = []
-    for paragraph in items:
+    for paragraph in selected_items:
         norm_labels = normative_columns(paragraph)
         master_rows.append([
             paragraph,

@@ -10,7 +10,7 @@ import streamlit as st
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font
 
-from spanish_kmedoids_10 import ICOM_KEYWORDS, LEY_19_2013_KEYWORDS, keyword_labels
+from spanish_kmedoids_10 import ICOM_KEYWORDS, LEY_19_2013_KEYWORDS, keyword_labels, select_k_medoids_paragraphs
 
 # --------------------------
 # Utilidades
@@ -47,17 +47,26 @@ def make_excel_bytes(rows: List[List], header: List[str]) -> bytes:
     wb.save(buf)
     return buf.getvalue()
 
-def taxonomy_to_rows(taxonomy: Dict[str, List[str]]) -> List[Dict[str, str]]:
-    return [
-        {"etiqueta": label, "palabras_clave": ", ".join(keywords)}
+def taxonomy_to_text(taxonomy: Dict[str, List[str]]) -> str:
+    return "\n".join(
+        f"{label} = {', '.join(keywords)}"
         for label, keywords in taxonomy.items()
-    ]
+    )
 
-def rows_to_taxonomy(rows) -> Dict[str, List[str]]:
+def text_to_taxonomy(text: str) -> Dict[str, List[str]]:
     taxonomy = {}
-    for row in rows:
-        label = str(row.get("etiqueta", "")).strip()
-        raw_keywords = str(row.get("palabras_clave", "")).strip()
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" in line:
+            label, raw_keywords = line.split("=", 1)
+        elif ":" in line:
+            label, raw_keywords = line.split(":", 1)
+        else:
+            continue
+        label = label.strip()
+        raw_keywords = raw_keywords.strip()
         if not label or not raw_keywords:
             continue
         keywords = [kw.strip() for kw in raw_keywords.split(",") if kw.strip()]
@@ -65,13 +74,13 @@ def rows_to_taxonomy(rows) -> Dict[str, List[str]]:
             taxonomy[label] = keywords
     return taxonomy
 
-def normative_columns_custom(text: str, ley_taxonomy: Dict[str, List[str]], icom_taxonomy: Dict[str, List[str]]) -> Dict[str, str]:
-    ley_labels = keyword_labels(text, ley_taxonomy)
+def normative_columns_custom(text: str, law_taxonomy: Dict[str, List[str]], icom_taxonomy: Dict[str, List[str]]) -> Dict[str, str]:
+    law_labels = keyword_labels(text, law_taxonomy)
     icom_labels = keyword_labels(text, icom_taxonomy)
     return {
-        "ley 19/2013": "; ".join(ley_labels),
+        "ley": "; ".join(law_labels),
         "codigo deontologico": "; ".join(icom_labels),
-        "otros": "" if ley_labels or icom_labels else "otros",
+        "otros": "" if law_labels or icom_labels else "otros",
     }
 
 # --------------------------
@@ -86,61 +95,86 @@ with st.expander("Que significa cada parte", expanded=True):
         """
         - **Pegar texto**: pega aqui el contenido de una memoria si quieres probar sin subir archivo.
         - **Subir archivo .txt/.md**: carga una memoria completa desde tu ordenador.
-        - **Ley 19/2013**: etiquetas de transparencia. La herramienta mira si cada parrafo contiene palabras clave de esas etiquetas.
-        - **Codigo deontologico ICOM**: etiquetas de buenas practicas museologicas. Funciona igual: busca palabras clave en cada parrafo.
-        - **Palabras clave**: terminos que activan una etiqueta. Puedes editarlas separandolas con comas.
-        - **Otros temas**: se rellena cuando el parrafo no encaja ni en Ley 19/2013 ni en Codigo deontologico ICOM.
-        - **Restaurar Ley / Restaurar ICOM**: vuelve a poner las etiquetas originales si cambiaste algo y quieres empezar de nuevo.
+        - **Numero de K medoides**: cantidad de parrafos representativos que quieres obtener. Si pones 24, el Excel tendra 24 parrafos.
+        - **Nombre de la ley o marco 1**: cambia aqui Ley 19/2013 por cualquier otra ley o marco que quieras analizar.
+        - **Nombre del marco 2**: puedes dejar Codigo deontologico ICOM o cambiarlo por otro marco.
+        - **Etiquetas y palabras clave**: escribe una etiqueta por linea con este formato: etiqueta = palabra1, palabra2, palabra3.
+        - **Otros temas**: se rellena cuando el parrafo no encaja en ninguno de los dos marcos.
+        - **Restaurar marco 1 / Restaurar marco 2**: vuelve a poner las etiquetas originales si cambiaste algo y quieres empezar de nuevo.
         - **Procesar**: crea el Excel final.
-        - **Archivo madre etiquetado**: el unico archivo de salida. Contiene una fila por parrafo y cuatro columnas: parrafo, ley 19/2013, codigo deontologico icom y otros temas.
+        - **Archivo madre etiquetado**: el unico archivo de salida. Contiene una fila por parrafo y cuatro columnas: parrafo, marco 1, marco 2 y otros temas.
         """
     )
 
-with st.sidebar:
-    st.header("Etiquetas")
-    st.caption("Edita las palabras clave separadas por comas. Puedes agregar o borrar filas.")
+with st.container():
+    st.subheader("Editar leyes y etiquetas")
+    st.caption("Formato: una etiqueta por linea. Ejemplo: presupuesto_aprobado = presupuesto, cuentas, gasto")
 
-    if "ley_taxonomy_rows" not in st.session_state:
-        st.session_state.ley_taxonomy_rows = taxonomy_to_rows(LEY_19_2013_KEYWORDS)
-    if "icom_taxonomy_rows" not in st.session_state:
-        st.session_state.icom_taxonomy_rows = taxonomy_to_rows(ICOM_KEYWORDS)
+    if "law_name" not in st.session_state:
+        st.session_state.law_name = "ley 19/2013"
+    if "icom_name" not in st.session_state:
+        st.session_state.icom_name = "codigo deontologico icom"
+    if "law_taxonomy_text" not in st.session_state:
+        st.session_state.law_taxonomy_text = taxonomy_to_text(LEY_19_2013_KEYWORDS)
+    if "icom_taxonomy_text" not in st.session_state:
+        st.session_state.icom_taxonomy_text = taxonomy_to_text(ICOM_KEYWORDS)
 
-    with st.expander("Ley 19/2013", expanded=False):
-        ley_taxonomy_rows = st.data_editor(
-            st.session_state.ley_taxonomy_rows,
-            num_rows="dynamic",
-            use_container_width=True,
-            key="ley_taxonomy_editor",
-            column_config={
-                "etiqueta": st.column_config.TextColumn("Etiqueta"),
-                "palabras_clave": st.column_config.TextColumn("Palabras clave"),
-            },
+    law_name = st.text_input(
+        "Nombre de la ley o marco 1",
+        value=st.session_state.law_name,
+        help="Este nombre sera el titulo de la columna en el Excel. Puedes cambiarlo por otra ley.",
+    )
+    icom_name = st.text_input(
+        "Nombre del marco 2",
+        value=st.session_state.icom_name,
+        help="Este nombre sera el titulo de la segunda columna de etiquetas.",
+    )
+
+    with st.expander(law_name, expanded=True):
+        law_taxonomy_text = st.text_area(
+            "Etiquetas y palabras clave del marco 1",
+            value=st.session_state.law_taxonomy_text,
+            height=320,
+            help="Una etiqueta por linea. Ejemplo: contratos_publicos = contrato, licitacion, adjudicacion",
         )
 
-    with st.expander("Codigo deontologico ICOM", expanded=False):
-        icom_taxonomy_rows = st.data_editor(
-            st.session_state.icom_taxonomy_rows,
-            num_rows="dynamic",
-            use_container_width=True,
-            key="icom_taxonomy_editor",
-            column_config={
-                "etiqueta": st.column_config.TextColumn("Etiqueta"),
-                "palabras_clave": st.column_config.TextColumn("Palabras clave"),
-            },
+    with st.expander(icom_name, expanded=True):
+        icom_taxonomy_text = st.text_area(
+            "Etiquetas y palabras clave del marco 2",
+            value=st.session_state.icom_taxonomy_text,
+            height=320,
+            help="Una etiqueta por linea. Ejemplo: accesibilidad = accesible, discapacidad, inclusion",
         )
 
     col_reset_ley, col_reset_icom = st.columns(2)
     with col_reset_ley:
-        if st.button("Restaurar Ley"):
-            st.session_state.ley_taxonomy_rows = taxonomy_to_rows(LEY_19_2013_KEYWORDS)
+        if st.button("Restaurar marco 1"):
+            st.session_state.law_name = "ley 19/2013"
+            st.session_state.law_taxonomy_text = taxonomy_to_text(LEY_19_2013_KEYWORDS)
             st.rerun()
     with col_reset_icom:
-        if st.button("Restaurar ICOM"):
-            st.session_state.icom_taxonomy_rows = taxonomy_to_rows(ICOM_KEYWORDS)
+        if st.button("Restaurar marco 2"):
+            st.session_state.icom_name = "codigo deontologico icom"
+            st.session_state.icom_taxonomy_text = taxonomy_to_text(ICOM_KEYWORDS)
             st.rerun()
 
-ley_taxonomy = rows_to_taxonomy(ley_taxonomy_rows)
-icom_taxonomy = rows_to_taxonomy(icom_taxonomy_rows)
+law_taxonomy = text_to_taxonomy(law_taxonomy_text)
+icom_taxonomy = text_to_taxonomy(icom_taxonomy_text)
+
+if not law_taxonomy:
+    st.warning("El marco 1 no tiene etiquetas validas. Usa el formato: etiqueta = palabra1, palabra2")
+if not icom_taxonomy:
+    st.warning("El marco 2 no tiene etiquetas validas. Usa el formato: etiqueta = palabra1, palabra2")
+
+st.subheader("Cantidad de parrafos representativos")
+k_medoids = st.number_input(
+    "Numero de K medoides",
+    min_value=1,
+    max_value=200,
+    value=24,
+    step=1,
+    help="Controla cuantos parrafos representativos apareceran en el Excel final. Por ejemplo: si pones 24, el Excel tendra 24 parrafos.",
+)
 
 st.write("**Entrada de texto** (pega tu texto o sube un .txt/.md). Si hay saltos de línea, se usan como párrafos; si no, se segmenta por oraciones.")
 col1, col2 = st.columns(2)
@@ -162,29 +196,30 @@ if st.button("Procesar"):
         st.error("No se detectaron oraciones/párrafos en el texto.")
         st.stop()
 
+    selected_items = select_k_medoids_paragraphs(items, k=int(k_medoids), seed=42)
     master_rows = []
     preview_rows = []
-    for paragraph in items:
-        norm_labels = normative_columns_custom(paragraph, ley_taxonomy, icom_taxonomy)
+    for paragraph in selected_items:
+        norm_labels = normative_columns_custom(paragraph, law_taxonomy, icom_taxonomy)
         master_rows.append([
             paragraph,
-            norm_labels["ley 19/2013"],
+            norm_labels["ley"],
             norm_labels["codigo deontologico"],
             norm_labels["otros"],
         ])
         preview_rows.append({
             "parrafo": paragraph,
-            "ley 19/2013": norm_labels["ley 19/2013"],
-            "codigo deontologico icom": norm_labels["codigo deontologico"],
+            law_name: norm_labels["ley"],
+            icom_name: norm_labels["codigo deontologico"],
             "otros temas": norm_labels["otros"],
         })
     master_excel_bytes = make_excel_bytes(
         master_rows,
-        header=["parrafo", "ley 19/2013", "codigo deontologico icom", "otros temas"],
+        header=["parrafo", law_name, icom_name, "otros temas"],
     )
 
     excel_mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    st.success("Archivo madre listo.")
+    st.success(f"Archivo madre listo con {len(selected_items)} parrafos representativos.")
     st.download_button("Descargar archivo_madre_etiquetado.xlsx", data=master_excel_bytes, file_name="archivo_madre_etiquetado.xlsx", mime=excel_mime)
 
     # Opcional: previews
