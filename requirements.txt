@@ -1,7 +1,2 @@
-matplotlib
-numpy
-scikit-learn
-scikit-learn-extra
+openpyxl
 streamlit
-torch
-transformers

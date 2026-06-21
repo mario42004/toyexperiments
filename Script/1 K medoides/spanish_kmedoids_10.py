@@ -1,23 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+from __future__ import annotations
 
 import os
 import re
-import csv
 import random
 import argparse
 import unicodedata
 from pathlib import Path
 from typing import List, Dict
 
-import numpy as np
-import matplotlib.pyplot as plt
-from sklearn.manifold import TSNE
-from sklearn_extra.cluster import KMedoids
-from sklearn.metrics import pairwise_distances
-
-import torch
-from transformers import AutoTokenizer, AutoModel
+from openpyxl import Workbook
+from openpyxl.styles import Alignment, Font
 
 DEFAULT_MODEL = "dccuchile/bert-base-spanish-wwm-cased"
 
@@ -105,10 +99,6 @@ ICOM_KEYWORDS = {
 # --------------------------
 def set_seed(seed: int = 42):
     random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
 
 
 def read_txt_file(path: str) -> str:
@@ -203,6 +193,31 @@ def normative_columns(text: str) -> Dict[str, str]:
     }
 
 
+def write_xlsx(path: str, header: List[str], rows: List[List]):
+    """Escribe una hoja Excel simple con cabecera y filas."""
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "archivo_madre"
+    ws.append(header)
+    for row in rows:
+        ws.append(row)
+
+    for cell in ws[1]:
+        cell.font = Font(bold=True)
+        cell.alignment = Alignment(wrap_text=True, vertical="top")
+
+    for row in ws.iter_rows(min_row=2):
+        for cell in row:
+            cell.alignment = Alignment(wrap_text=True, vertical="top")
+
+    ws.column_dimensions["A"].width = 90
+    ws.column_dimensions["B"].width = 35
+    ws.column_dimensions["C"].width = 35
+    ws.column_dimensions["D"].width = 25
+
+    wb.save(path)
+
+
 def elbow_curve(D: np.ndarray, max_k: int = 12, seed: int = 42) -> Dict[int, float]:
     """Calcula curva elbow para distintos K."""
     max_k = min(max_k, D.shape[0])
@@ -235,65 +250,35 @@ def main():
     os.makedirs(args.save_dir, exist_ok=True)
 
     base_name = Path(args.file).stem
-    print(f"\n📘 Procesando archivo: {args.file}")
-    print(f"📂 Guardando en: {args.save_dir}/")
+    print(f"\nProcesando archivo: {args.file}")
+    print(f"Guardando en: {args.save_dir}/")
 
     # --- Lectura y segmentación ---
     text = read_txt_file(args.file)
     items = split_sentences_or_paragraphs(text)
-    print(f"🧩 Total de oraciones/párrafos detectados: {len(items)}")
+    print(f"Total de oraciones/parrafos detectados: {len(items)}")
 
-    if len(items) < args.k:
-        print(f"[WARN] K ({args.k}) mayor que número de oraciones ({len(items)}). Se ajusta a {len(items)}.")
-        args.k = len(items)
+    # --- Archivo madre: parrafos completos + etiquetas normativas ---
+    master_xlsx = os.path.join(args.save_dir, f"{base_name}_archivo_madre_etiquetado.xlsx")
+    master_rows = []
+    for paragraph in items:
+        norm_labels = normative_columns(paragraph)
+        master_rows.append([
+            paragraph,
+            norm_labels["ley 19/2013"],
+            norm_labels["codigo deontologico"],
+            norm_labels["otros"],
+        ])
+    write_xlsx(
+        master_xlsx,
+        ["parrafo", "ley 19/2013", "codigo deontologico icom", "otros temas"],
+        master_rows,
+    )
+    print(f"[OK] Guardado archivo madre: {master_xlsx}")
 
-    # --- Embeddings + distancias ---
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    X = get_bert_embeddings(items, model_name=args.model, device=device)
-    D = pairwise_distance_matrix(X, metric=args.distance_metric)
-
-    # --- Elbow ---
-    elbow = elbow_curve(D, max_k=args.max_k, seed=args.seed)
-    elbow_csv = os.path.join(args.save_dir, f"{base_name}_elbow_k_vs_cost.csv")
-    with open(elbow_csv, "w", newline="", encoding="utf-8") as f:
-        w = csv.writer(f)
-        w.writerow(["k", "cost"])
-        for k in sorted(elbow.keys()):
-            w.writerow([k, elbow[k]])
-    print(f"[OK] Guardado elbow: {elbow_csv}")
-
-    # --- K-Medoids ---
-    print(f"⚙️  Ejecutando K-Medoids con k={args.k} ...")
-    model = KMedoids(n_clusters=args.k, metric="precomputed", random_state=args.seed)
-    model.fit(D)
-    labels = model.labels_
-    medoids = model.medoid_indices_
-    medoid_texts = [items[i] for i in medoids]
-
-    # --- CSV 1: Medoids (frases representativas) ---
-    medoids_csv = os.path.join(args.save_dir, f"{base_name}_kmedoids_medoids.csv")
-    with open(medoids_csv, "w", newline="", encoding="utf-8") as f:
-        w = csv.writer(f)
-        w.writerow(["cluster_id", "representative_sentence", "ley 19/2013", "codigo deontologico", "otros"])
-        for cid, mtxt in enumerate(medoid_texts):
-            labels = normative_columns(mtxt)
-            w.writerow([cid, mtxt, labels["ley 19/2013"], labels["codigo deontologico"], labels["otros"]])
-    print(f"[OK] Guardado medoides: {medoids_csv}")
-
-    # --- CSV 2: Asignaciones (frase → cluster) ---
-    assign_csv = os.path.join(args.save_dir, f"{base_name}_cluster_assignments.csv")
-    with open(assign_csv, "w", newline="", encoding="utf-8") as f:
-        w = csv.writer(f)
-        w.writerow(["sentence", "cluster_id"])
-        for sent, lab in zip(items, labels):
-            w.writerow([sent, int(lab)])
-    print(f"[OK] Guardado asignaciones: {assign_csv}")
-
-    print(f"\n✅ Completado: {base_name}")
-    print(f"📄 Archivos generados:")
-    print(f"   ├─ {os.path.basename(elbow_csv)}")
-    print(f"   ├─ {os.path.basename(medoids_csv)}")
-    print(f"   └─ {os.path.basename(assign_csv)}")
+    print(f"\nCompletado: {base_name}")
+    print("Archivo generado:")
+    print(f"   - {os.path.basename(master_xlsx)}")
 
 
 if __name__ == "__main__":
