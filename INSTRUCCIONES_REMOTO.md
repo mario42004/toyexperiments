@@ -44,7 +44,7 @@ Comando remoto recomendado despues del `push`:
 ```bash
 cd /home/labgpu/Descargas/unidades/mario_gpu/tesis_2026/toyexperiments
 git pull
-pkill -f "streamlit run Script/1 K medoides/k_medoids_streamlit.py" 2>/dev/null || true
+pgrep -f "[s]treamlit run Script/1 K medoides/k_medoids_streamlit.py" | xargs -r kill
 setsid python3 -m streamlit run "Script/1 K medoides/k_medoids_streamlit.py" --server.port 8501 --server.address 0.0.0.0 --server.headless true > streamlit.log 2>&1 < /dev/null &
 ```
 
@@ -65,7 +65,7 @@ for tunnel in data.get("tunnels", []):
 PY
 ```
 
-Si el API de ngrok no responde, revisar `ngrok.log`. Para evitar falsos positivos al buscar procesos, usar siempre el patron `[n]grok http 8501`, no `ngrok http 8501` directamente con `pgrep`.
+Si el API de ngrok no responde, revisar `ngrok.log`. Para evitar falsos positivos al buscar procesos, usar siempre patrones como `[n]grok http 8501` y `[s]treamlit run ...`, no el texto literal directamente con `pgrep` o `pkill`.
 
 ## Nota para Codex
 
