@@ -18,9 +18,22 @@ from spanish_kmedoids_10 import ICOM_KEYWORDS, LEY_19_2013_KEYWORDS, keyword_lab
 def is_legible_paragraph(text: str) -> bool:
     letters = re.findall(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]", text)
     visible_chars = re.findall(r"\S", text)
+    words = re.findall(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]{3,}", text.lower())
+    short_tokens = re.findall(r"\b[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]{1,2}\b", text.lower())
+    numeric_tokens = re.findall(r"\b\d+(?:[.,]\d+)?\b", text)
+    table_tokens = re.findall(r"\b(?:td|tr|lt|gt)\b", text.lower())
+    all_tokens = re.findall(r"\b\w+\b", text.lower())
     if len(letters) < 12:
         return False
-    return len(letters) / max(len(visible_chars), 1) >= 0.35
+    if len(words) < 4:
+        return False
+    if len(table_tokens) >= 3:
+        return False
+    if len(numeric_tokens) > len(words):
+        return False
+    if len(short_tokens) / max(len(all_tokens), 1) > 0.35:
+        return False
+    return len(letters) / max(len(visible_chars), 1) >= 0.45
 
 
 def split_sentences_or_paragraphs(text: str) -> List[str]:
