@@ -15,6 +15,14 @@ from spanish_kmedoids_10 import ICOM_KEYWORDS, LEY_19_2013_KEYWORDS, keyword_lab
 # --------------------------
 # Utilidades
 # --------------------------
+def is_legible_paragraph(text: str) -> bool:
+    letters = re.findall(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]", text)
+    visible_chars = re.findall(r"\S", text)
+    if len(letters) < 12:
+        return False
+    return len(letters) / max(len(visible_chars), 1) >= 0.35
+
+
 def split_sentences_or_paragraphs(text: str) -> List[str]:
     """
     Divide el texto en oraciones o párrafos.
@@ -22,9 +30,9 @@ def split_sentences_or_paragraphs(text: str) -> List[str]:
     """
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
     if len(lines) > 1:
-        return lines
+        return [line for line in lines if is_legible_paragraph(line)]
     sentences = [s.strip() for s in re.split(r"[.!?]\s+", text) if len(s.strip()) > 0]
-    return sentences
+    return [sentence for sentence in sentences if is_legible_paragraph(sentence)]
 
 def make_excel_bytes(rows: List[List], header: List[str]) -> bytes:
     buf = io.BytesIO()
@@ -218,7 +226,7 @@ if process_clicked:
 
     items = split_sentences_or_paragraphs(texto)
     if len(items) == 0:
-        st.error("No se detectaron oraciones/párrafos en el texto.")
+        st.error("No se detectaron parrafos con suficiente texto legible. Se descartan fragmentos compuestos solo por numeros, codigos o signos.")
         st.stop()
 
     selected_items = select_k_medoids_paragraphs(items, k=int(k_medoids), seed=42)
