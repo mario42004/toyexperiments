@@ -87,6 +87,27 @@ def normative_columns_custom(text: str, law_taxonomy: Dict[str, List[str]], icom
 # UI
 # --------------------------
 st.set_page_config(page_title="Archivo madre etiquetado", page_icon="🧩", layout="centered")
+st.markdown(
+    """
+    <style>
+    div.stButton > button[kind="primary"] {
+        background-color: #16a34a;
+        border: 1px solid #15803d;
+        border-radius: 8px;
+        color: white;
+        font-size: 1.35rem;
+        font-weight: 700;
+        min-height: 4rem;
+    }
+    div.stButton > button[kind="primary"]:hover {
+        background-color: #15803d;
+        border-color: #166534;
+        color: white;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 st.title("Archivo madre etiquetado")
 st.write("Esta herramienta lee una memoria, separa sus parrafos y genera un solo Excel con las etiquetas normativas.")
 
@@ -186,7 +207,11 @@ with col2:
 if up and not texto.strip():
     texto = up.read().decode("utf-8", errors="replace")
 
-if st.button("Procesar"):
+_, process_col, _ = st.columns([1, 2, 1])
+with process_col:
+    process_clicked = st.button("Procesar", type="primary", use_container_width=True)
+
+if process_clicked:
     if not texto.strip():
         st.error("Por favor, introduce texto o sube un .txt.")
         st.stop()
