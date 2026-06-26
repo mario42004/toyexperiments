@@ -14,6 +14,7 @@ from spanish_kmedoids_10 import (
     ICOM_KEYWORDS,
     LEY_19_2013_KEYWORDS,
     keyword_labels,
+    normalize_for_keywords,
     select_k_medoids_paragraphs,
 )
 
@@ -21,6 +22,14 @@ from spanish_kmedoids_10 import (
 # --------------------------
 # Utilidades
 # --------------------------
+STOPWORDS = {
+    "para", "por", "con", "sin", "del", "las", "los", "una", "uno", "unos",
+    "unas", "que", "como", "sobre", "entre", "desde", "hasta", "esta", "este",
+    "estos", "estas", "tambien", "donde", "cuando", "cada", "otros", "otras",
+    "informacion", "transparencia", "dimension", "codigo", "marco", "temas",
+}
+
+
 def is_legible_paragraph(text: str) -> bool:
     letters = re.findall(r"[^\W\d_]", text)
     visible_chars = re.findall(r"\S", text)
@@ -56,6 +65,41 @@ def split_sentences_or_paragraphs(text: str) -> List[str]:
     return [sentence for sentence in sentences if is_legible_paragraph(sentence)]
 
 
+def semantic_tokens(text: str) -> set[str]:
+    normalized = normalize_for_keywords(text.replace("_", " "))
+    tokens = re.findall(r"\b[a-z0-9]{3,}\b", normalized)
+    return {token for token in tokens if token not in STOPWORDS}
+
+
+def semantic_label_suggestions(
+    text: str,
+    taxonomy: Dict[str, List[str]],
+    threshold: float,
+    max_labels: int = 2,
+) -> List[str]:
+    text_tokens = semantic_tokens(text)
+    if not text_tokens:
+        return []
+
+    scored_labels = []
+    for label, keywords in taxonomy.items():
+        label_text = label.replace("_", " ")
+        prototype_tokens = semantic_tokens(" ".join([label_text, *keywords]))
+        if not prototype_tokens:
+            continue
+
+        overlap = text_tokens.intersection(prototype_tokens)
+        if not overlap:
+            continue
+
+        score = len(overlap) / ((len(text_tokens) * len(prototype_tokens)) ** 0.5)
+        if score >= threshold:
+            scored_labels.append((score, label))
+
+    scored_labels.sort(reverse=True)
+    return [label for _, label in scored_labels[:max_labels]]
+
+
 def make_excel_bytes(rows: List[List], header: List[str]) -> bytes:
     buf = io.BytesIO()
     wb = Workbook()
@@ -74,10 +118,9 @@ def make_excel_bytes(rows: List[List], header: List[str]) -> bytes:
         for cell in row:
             cell.alignment = Alignment(wrap_text=True, vertical="top")
 
-    ws.column_dimensions["A"].width = 90
-    ws.column_dimensions["B"].width = 35
-    ws.column_dimensions["C"].width = 35
-    ws.column_dimensions["D"].width = 25
+    widths = [90, 35, 35, 35, 35, 45, 20]
+    for index, width in enumerate(widths, start=1):
+        ws.column_dimensions[chr(64 + index)].width = width
     wb.save(buf)
     return buf.getvalue()
 
@@ -115,17 +158,25 @@ def text_to_taxonomy(text: str) -> Dict[str, List[str]]:
     return taxonomy
 
 
-def normative_columns_custom(
+def assisted_labeling_columns(
     text: str,
     law_taxonomy: Dict[str, List[str]],
     icom_taxonomy: Dict[str, List[str]],
+    semantic_threshold: float,
 ) -> Dict[str, str]:
     law_labels = keyword_labels(text, law_taxonomy)
     icom_labels = keyword_labels(text, icom_taxonomy)
+    law_semantic = [] if law_labels else semantic_label_suggestions(text, law_taxonomy, semantic_threshold)
+    icom_semantic = [] if icom_labels else semantic_label_suggestions(text, icom_taxonomy, semantic_threshold)
+    final_labels = law_labels + icom_labels + law_semantic + icom_semantic
+    used_semantic = bool(law_semantic or icom_semantic)
     return {
-        "ley": "; ".join(law_labels),
-        "codigo deontologico": "; ".join(icom_labels),
-        "otros": "" if law_labels or icom_labels else "otros",
+        "ley_diccionario": "; ".join(law_labels),
+        "codigo_diccionario": "; ".join(icom_labels),
+        "ley_semantica": "; ".join(law_semantic),
+        "codigo_semantica": "; ".join(icom_semantic),
+        "etiqueta_final": "; ".join(final_labels) if final_labels else "otros temas",
+        "requiere_revision": "si" if used_semantic or not final_labels else "no",
     }
 
 
@@ -175,10 +226,10 @@ with st.expander("Que significa cada parte", expanded=True):
         - **Nombre de la ley o marco 1**: cambia aqui Ley 19/2013 por cualquier otra ley o marco que quieras analizar.
         - **Nombre del marco 2**: puedes dejar Codigo deontologico ICOM o cambiarlo por otro marco.
         - **Etiquetas y palabras clave**: escribe una etiqueta por linea con este formato: etiqueta = palabra1, palabra2, palabra3.
-        - **Otros temas**: se rellena cuando el parrafo no encaja en ninguno de los dos marcos.
+        - **Etiqueta final**: combina etiquetas por diccionario y, si falta coincidencia literal, sugerencias semanticas marcadas para revision.
         - **Restaurar marco 1 / Restaurar marco 2**: vuelve a poner las etiquetas originales si cambiaste algo y quieres empezar de nuevo.
         - **Procesar**: crea el Excel final.
-        - **Archivo madre etiquetado**: el unico archivo de salida. Contiene una fila por parrafo y cuatro columnas: parrafo, marco 1, marco 2 y otros temas.
+        - **Archivo madre etiquetado**: el unico archivo de salida. Contiene una fila por parrafo y columnas separadas para diccionario, sugerencia semantica, etiqueta final y revision.
         """
     )
 
@@ -186,9 +237,9 @@ with st.expander("Nota metodologica", expanded=False):
     st.markdown(
         """
         La version actual usa una clasificacion asistida por diccionario normativo:
-        es transparente, reproducible y facil de revisar. El zero-shot puede
-        incorporarse despues como segunda capa de apoyo para sugerir etiquetas
-        que no capta el diccionario, pero no conviene usarlo como juez unico.
+        es transparente, reproducible y facil de revisar. La capa semantica
+        funciona como apoyo para parrafos sin coincidencias literales y sus
+        resultados quedan marcados para revision.
         """
     )
 
@@ -268,6 +319,18 @@ k_medoids = st.number_input(
     ),
 )
 
+semantic_threshold = st.slider(
+    "Sensibilidad de la sugerencia semantica",
+    min_value=0.03,
+    max_value=0.30,
+    value=0.08,
+    step=0.01,
+    help=(
+        "Valores mas bajos sugieren mas etiquetas, pero pueden generar mas falsos positivos. "
+        "Valores mas altos son mas conservadores."
+    ),
+)
+
 st.write(
     "**Entrada de texto** (pega tu texto o sube un .txt/.md). Si hay saltos "
     "de linea, se usan como parrafos; si no, se segmenta por oraciones."
@@ -307,27 +370,46 @@ if process_clicked:
     preview_rows = []
 
     for paragraph in selected_items:
-        norm_labels = normative_columns_custom(paragraph, law_taxonomy, icom_taxonomy)
+        norm_labels = assisted_labeling_columns(
+            paragraph,
+            law_taxonomy,
+            icom_taxonomy,
+            semantic_threshold,
+        )
         master_rows.append(
             [
                 paragraph,
-                norm_labels["ley"],
-                norm_labels["codigo deontologico"],
-                norm_labels["otros"],
+                norm_labels["ley_diccionario"],
+                norm_labels["codigo_diccionario"],
+                norm_labels["ley_semantica"],
+                norm_labels["codigo_semantica"],
+                norm_labels["etiqueta_final"],
+                norm_labels["requiere_revision"],
             ]
         )
         preview_rows.append(
             {
                 "parrafo": paragraph,
-                law_name: norm_labels["ley"],
-                icom_name: norm_labels["codigo deontologico"],
-                "otros temas": norm_labels["otros"],
+                f"{law_name}_diccionario": norm_labels["ley_diccionario"],
+                f"{icom_name}_diccionario": norm_labels["codigo_diccionario"],
+                f"{law_name}_semantica": norm_labels["ley_semantica"],
+                f"{icom_name}_semantica": norm_labels["codigo_semantica"],
+                "etiqueta_final": norm_labels["etiqueta_final"],
+                "requiere_revision": norm_labels["requiere_revision"],
             }
         )
 
     master_excel_bytes = make_excel_bytes(
         master_rows,
-        header=["parrafo", law_name, icom_name, "otros temas"],
+        header=[
+            "parrafo",
+            f"{law_name}_diccionario",
+            f"{icom_name}_diccionario",
+            f"{law_name}_semantica",
+            f"{icom_name}_semantica",
+            "etiqueta_final",
+            "requiere_revision",
+        ],
     )
 
     excel_mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
