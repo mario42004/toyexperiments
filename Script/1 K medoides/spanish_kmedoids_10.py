@@ -111,7 +111,9 @@ ICOM_KEYWORDS = {
         "documentacion", "conservacion preventiva", "restauracion",
         "adquisiciones", "adquisicion", "donaciones", "donacion",
         "depositos", "deposito", "prestamos", "prestamo",
-        "bajas de coleccion", "baja de coleccion",
+        "bajas de coleccion", "baja de coleccion", "digitalizacion",
+        "objetos digitales", "banco de imagenes", "imagenes archivisticas",
+        "imagen archivistica",
     ],
     "dimension_04_transparencia_procedencia_legalidad": [
         "procedencia", "titularidad", "autenticidad", "diligencia debida",

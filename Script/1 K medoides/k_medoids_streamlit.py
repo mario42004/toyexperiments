@@ -17,6 +17,7 @@ from spanish_kmedoids_10 import (
     ICOM_KEYWORDS,
     LEY_19_2013_KEYWORDS,
     keyword_labels,
+    normalize_for_keywords,
     select_k_medoids_paragraphs,
 )
 
@@ -24,6 +25,15 @@ from spanish_kmedoids_10 import (
 # --------------------------
 # Utilidades
 # --------------------------
+STOPWORDS = {
+    "para", "por", "con", "sin", "del", "las", "los", "una", "uno", "unos",
+    "unas", "que", "como", "sobre", "entre", "desde", "hasta", "esta", "este",
+    "estos", "estas", "tambien", "donde", "cuando", "cada", "otros", "otras",
+    "informacion", "transparencia", "dimension", "codigo", "marco", "temas",
+    "institucion", "institucional", "museo", "museos",
+}
+
+
 def is_legible_paragraph(text: str) -> bool:
     letters = re.findall(r"[^\W\d_]", text)
     visible_chars = re.findall(r"\S", text)
@@ -118,6 +128,43 @@ def display_taxonomy(taxonomy: Dict[str, List[str]]) -> Dict[str, List[str]]:
     return {label_to_display(label): keywords for label, keywords in taxonomy.items()}
 
 
+def tokens_for_candidate_selection(text: str) -> set[str]:
+    normalized = normalize_for_keywords(text.replace("_", " "))
+    tokens = re.findall(r"\b[a-z0-9]{3,}\b", normalized)
+    return {token for token in tokens if token not in STOPWORDS}
+
+
+def select_candidate_taxonomies(
+    paragraph: str,
+    law_taxonomy: Dict[str, List[str]],
+    icom_taxonomy: Dict[str, List[str]],
+    max_candidates: int = 18,
+) -> tuple[Dict[str, List[str]], Dict[str, List[str]]]:
+    paragraph_tokens = tokens_for_candidate_selection(paragraph)
+    scored = []
+    for marco, taxonomy in [("ley", law_taxonomy), ("icom", icom_taxonomy)]:
+        for label, keywords in taxonomy.items():
+            display_label = label_to_display(label)
+            candidate_tokens = tokens_for_candidate_selection(" ".join([display_label, *keywords]))
+            overlap = paragraph_tokens.intersection(candidate_tokens)
+            if overlap:
+                score = len(overlap)
+                scored.append((score, marco, display_label, keywords))
+
+    if not scored:
+        return {}, display_taxonomy(icom_taxonomy)
+
+    scored.sort(reverse=True)
+    law_candidates = {}
+    icom_candidates = {}
+    for _, marco, label, keywords in scored[:max_candidates]:
+        if marco == "ley":
+            law_candidates[label] = keywords
+        else:
+            icom_candidates[label] = keywords
+    return law_candidates, icom_candidates
+
+
 def taxonomy_to_text(taxonomy: Dict[str, List[str]]) -> str:
     return "\n".join(
         f"{label_to_display(label)} = {', '.join(keywords)}"
@@ -183,6 +230,11 @@ def classify_with_ollama(
 ) -> Dict[str, str]:
     law_display_taxonomy = display_taxonomy(law_taxonomy)
     icom_display_taxonomy = display_taxonomy(icom_taxonomy)
+    law_prompt_taxonomy, icom_prompt_taxonomy = select_candidate_taxonomies(
+        paragraph,
+        law_taxonomy,
+        icom_taxonomy,
+    )
     valid_law_labels = set(law_display_taxonomy)
     valid_icom_labels = set(icom_display_taxonomy)
     valid_labels = valid_law_labels.union(valid_icom_labels).union({"indeterminado"})
@@ -192,7 +244,7 @@ Debes leer el parrafo y asignar UNA etiqueta dentro de una taxonomia cerrada.
 No inventes etiquetas. Si ninguna etiqueta corresponde razonablemente, usa "indeterminado".
 
 Taxonomia cerrada:
-{taxonomy_options_text(law_display_taxonomy, icom_display_taxonomy)}
+{taxonomy_options_text(law_prompt_taxonomy, icom_prompt_taxonomy)}
 
 Parrafo:
 \"\"\"{paragraph}\"\"\"
