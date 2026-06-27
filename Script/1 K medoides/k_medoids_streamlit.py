@@ -84,9 +84,43 @@ def make_excel_bytes(rows: List[List], header: List[str]) -> bytes:
     return buf.getvalue()
 
 
+def label_to_display(label: str) -> str:
+    label = re.sub(r"^dimension_\d+_", "", label)
+    prefixes = [
+        ("informacion_institucional_", "informacion institucional"),
+        ("informacion_organizativa_", "informacion organizativa"),
+        ("planificacion_", "informacion sobre planificacion"),
+        ("evaluacion_", "evaluacion del grado de cumplimiento"),
+        ("normativa_", "normativa que las rige"),
+        ("funciones_", "funciones que desarrolla"),
+        ("informacion_juridica_", "informacion juridica relevante"),
+        ("contratos_", "contratos"),
+        ("convenios_", "convenios"),
+        ("subvenciones_", "subvenciones y ayudas publicas"),
+        ("presupuestos_", "presupuestos"),
+        ("cuentas_anuales_", "cuentas anuales"),
+        ("estadisticas_", "estadisticas"),
+        ("acceso_", "acceso a la informacion"),
+        ("buen_gobierno_", "buen gobierno"),
+    ]
+    for prefix, group in prefixes:
+        if label.startswith(prefix):
+            topic = label.removeprefix(prefix).replace("_", " ")
+            return f"{group}, {topic}"
+    return label.replace("_", " ")
+
+
+def join_display_labels(labels: List[str]) -> str:
+    return ", ".join(label_to_display(label) for label in labels)
+
+
+def display_taxonomy(taxonomy: Dict[str, List[str]]) -> Dict[str, List[str]]:
+    return {label_to_display(label): keywords for label, keywords in taxonomy.items()}
+
+
 def taxonomy_to_text(taxonomy: Dict[str, List[str]]) -> str:
     return "\n".join(
-        f"{label} = {', '.join(keywords)}"
+        f"{label_to_display(label)} = {', '.join(keywords)}"
         for label, keywords in taxonomy.items()
     )
 
@@ -147,8 +181,10 @@ def classify_with_ollama(
     model: str,
     ollama_url: str,
 ) -> Dict[str, str]:
-    valid_law_labels = set(law_taxonomy)
-    valid_icom_labels = set(icom_taxonomy)
+    law_display_taxonomy = display_taxonomy(law_taxonomy)
+    icom_display_taxonomy = display_taxonomy(icom_taxonomy)
+    valid_law_labels = set(law_display_taxonomy)
+    valid_icom_labels = set(icom_display_taxonomy)
     valid_labels = valid_law_labels.union(valid_icom_labels).union({"indeterminado"})
     prompt = f"""
 Eres un clasificador academico para una tesis doctoral.
@@ -156,7 +192,7 @@ Debes leer el parrafo y asignar UNA etiqueta dentro de una taxonomia cerrada.
 No inventes etiquetas. Si ninguna etiqueta corresponde razonablemente, usa "indeterminado".
 
 Taxonomia cerrada:
-{taxonomy_options_text(law_taxonomy, icom_taxonomy)}
+{taxonomy_options_text(law_display_taxonomy, icom_display_taxonomy)}
 
 Parrafo:
 \"\"\"{paragraph}\"\"\"
@@ -231,7 +267,7 @@ def automated_labeling_columns(
     law_labels = keyword_labels(text, law_taxonomy)
     icom_labels = keyword_labels(text, icom_taxonomy)
     ia_labels = classify_with_ollama(text, law_taxonomy, icom_taxonomy, model, ollama_url)
-    dict_labels = law_labels + icom_labels
+    dict_labels = [label_to_display(label) for label in law_labels + icom_labels]
     confidence = float(ia_labels["confianza_ia"])
 
     if ia_labels["etiqueta_ia"] != "indeterminado" and confidence >= high_confidence:
@@ -241,15 +277,15 @@ def automated_labeling_columns(
         else:
             decision_rule = "ia_confianza_alta"
     elif dict_labels:
-        final_label = "; ".join(dict_labels)
+        final_label = ", ".join(dict_labels)
         decision_rule = "diccionario_por_confianza_ia_baja"
     else:
         final_label = "indeterminado"
         decision_rule = "sin_etiqueta_confiable"
 
     return {
-        "ley_diccionario": "; ".join(law_labels),
-        "codigo_diccionario": "; ".join(icom_labels),
+        "ley_diccionario": join_display_labels(law_labels),
+        "codigo_diccionario": join_display_labels(icom_labels),
         **ia_labels,
         "etiqueta_final": final_label,
         "regla_decision": decision_rule,
