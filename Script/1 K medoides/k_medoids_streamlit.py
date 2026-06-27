@@ -95,6 +95,22 @@ def make_excel_bytes(rows: List[List], header: List[str]) -> bytes:
 
 
 def label_to_display(label: str) -> str:
+    icom_labels = {
+        "dimension_01_transparencia_institucional": "transparencia institucional",
+        "dimension_02_transparencia_economica": "transparencia economica",
+        "dimension_03_transparencia_colecciones": "transparencia sobre las colecciones",
+        "dimension_04_transparencia_procedencia_legalidad": "transparencia sobre procedencia y legalidad",
+        "dimension_05_transparencia_cientifica": "transparencia cientifica",
+        "dimension_06_transparencia_educativa": "transparencia educativa",
+        "dimension_07_transparencia_acceso": "transparencia sobre el acceso",
+        "dimension_08_transparencia_servicio_publico": "transparencia del servicio publico",
+        "dimension_09_transparencia_social": "transparencia social",
+        "dimension_10_transparencia_cooperacion_institucional": "transparencia en cooperacion institucional",
+        "dimension_11_transparencia_juridica": "transparencia juridica",
+        "dimension_12_transparencia_etica": "transparencia etica",
+    }
+    if label in icom_labels:
+        return icom_labels[label]
     label = re.sub(r"^dimension_\d+_", "", label)
     prefixes = [
         ("informacion_institucional_", "informacion institucional"),
