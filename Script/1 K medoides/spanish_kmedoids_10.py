@@ -256,7 +256,9 @@ def keyword_labels(text: str, taxonomy: Dict[str, List[str]]) -> List[str]:
     labels = []
     for label, keywords in taxonomy.items():
         for keyword in keywords:
-            if normalize_for_keywords(keyword) in normalized_text:
+            normalized_keyword = normalize_for_keywords(keyword)
+            pattern = r"(?<!\w)" + re.escape(normalized_keyword) + r"(?!\w)"
+            if re.search(pattern, normalized_text):
                 labels.append(label)
                 break
     return labels
