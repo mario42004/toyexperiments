@@ -238,32 +238,35 @@ def keyword_hits_for_label(text: str, taxonomy: Dict[str, List[str]], label: str
     ]
 
 
-def quantitative_ia_justification(
-    paragraph: str,
-    law_taxonomy: Dict[str, List[str]],
-    icom_taxonomy: Dict[str, List[str]],
-    law_label: str,
-    icom_label: str,
+def textual_ia_justification(
+    framework_name: str,
+    label: str,
+    hits: List[str],
+    total_keywords: int,
 ) -> str:
-    law_hits = keyword_hits_for_label(paragraph, law_taxonomy, law_label)
-    icom_hits = keyword_hits_for_label(paragraph, icom_taxonomy, icom_label)
-    law_total = len(law_taxonomy.get(law_label, []))
-    icom_total = len(icom_taxonomy.get(icom_label, []))
-
-    law_summary = (
-        f"Ley 19/2013: {law_label} ({len(law_hits)}/{law_total} indicios lexicos)"
-        if law_label != "indeterminado"
-        else "Ley 19/2013: indeterminado (0 indicios suficientes)"
-    )
-    icom_summary = (
-        f"Codigo deontologico: {icom_label} ({len(icom_hits)}/{icom_total} indicios lexicos)"
-        if icom_label != "indeterminado"
-        else "Codigo deontologico: indeterminado (0 indicios suficientes)"
-    )
+    if label == "indeterminado":
+        return (
+            f"{framework_name}: indeterminado. "
+            "No se identificaron indicios textuales suficientes para asignar una etiqueta cerrada."
+        )
+    if not hits:
+        return (
+            f"{framework_name}: {label}. "
+            "No se detectaron indicios lexicos literales de la lista; la asignacion queda sustentada por correspondencia semantica del parrafo."
+        )
     return (
-        "Codificacion manual simulada: "
-        f"{law_summary}; {icom_summary}. "
-        "La asignacion se basa en la concentracion relativa de evidencias textuales del parrafo."
+        f"{framework_name}: {label}. "
+        f"Indicios detectados {len(hits)}/{total_keywords}: {', '.join(hits)}."
+    )
+
+
+def fallback_reasoning(framework_name: str, label: str) -> str:
+    if label == "indeterminado":
+        return (
+            f"No se asigna etiqueta para {framework_name} porque el parrafo no presenta una relacion normativa suficientemente clara con las categorias disponibles."
+        )
+    return (
+        f"Se asigna {label} para {framework_name} porque el contenido del parrafo guarda correspondencia tematica con esa categoria normativa."
     )
 
 
@@ -311,7 +314,9 @@ Parrafo:
 Responde solo JSON valido con este esquema:
 {{
   "etiqueta_ia_ley_19_2013": "una etiqueta exacta de LEY_19_2013 o indeterminado",
-  "etiqueta_ia_codigo_deontologico": "una etiqueta exacta de CODIGO_MUSEOS o indeterminado"
+  "etiqueta_ia_codigo_deontologico": "una etiqueta exacta de CODIGO_MUSEOS o indeterminado",
+  "razonamiento_ia_ley_19_2013": "una explicacion breve y clara de por que el parrafo encaja o no encaja con la etiqueta de Ley 19/2013",
+  "razonamiento_ia_codigo_deontologico": "una explicacion breve y clara de por que el parrafo encaja o no encaja con la etiqueta del Codigo deontologico"
 }}
 """
     payload = {
@@ -335,7 +340,10 @@ Responde solo JSON valido con este esquema:
         return {
             "etiqueta_ia_ley_19_2013": "indeterminado",
             "etiqueta_ia_codigo_deontologico": "indeterminado",
-            "justificacion_ia": f"Error al consultar Ollama: {exc}",
+            "justificacion_ia_ley_19_2013": f"Error al consultar Ollama: {exc}",
+            "justificacion_ia_codigo_deontologico": f"Error al consultar Ollama: {exc}",
+            "razonamiento_ia_ley_19_2013": "No se pudo generar razonamiento porque fallo la consulta a Ollama.",
+            "razonamiento_ia_codigo_deontologico": "No se pudo generar razonamiento porque fallo la consulta a Ollama.",
         }
 
     law_label = str(parsed.get("etiqueta_ia_ley_19_2013", "indeterminado")).strip()
@@ -345,16 +353,28 @@ Responde solo JSON valido con este esquema:
     if icom_label not in valid_icom_labels:
         icom_label = "indeterminado"
 
+    law_hits = keyword_hits_for_label(paragraph, law_taxonomy, law_label)
+    icom_hits = keyword_hits_for_label(paragraph, icom_taxonomy, icom_label)
+    law_reasoning = str(parsed.get("razonamiento_ia_ley_19_2013", "")).strip()
+    icom_reasoning = str(parsed.get("razonamiento_ia_codigo_deontologico", "")).strip()
+
     return {
         "etiqueta_ia_ley_19_2013": law_label,
         "etiqueta_ia_codigo_deontologico": icom_label,
-        "justificacion_ia": quantitative_ia_justification(
-            paragraph,
-            law_taxonomy,
-            icom_taxonomy,
+        "justificacion_ia_ley_19_2013": textual_ia_justification(
+            "Ley 19/2013",
             law_label,
-            icom_label,
+            law_hits,
+            len(law_taxonomy.get(law_label, [])),
         ),
+        "justificacion_ia_codigo_deontologico": textual_ia_justification(
+            "Codigo deontologico",
+            icom_label,
+            icom_hits,
+            len(icom_taxonomy.get(icom_label, [])),
+        ),
+        "razonamiento_ia_ley_19_2013": law_reasoning or fallback_reasoning("Ley 19/2013", law_label),
+        "razonamiento_ia_codigo_deontologico": icom_reasoning or fallback_reasoning("Codigo deontologico", icom_label),
     }
 
 
@@ -434,7 +454,7 @@ with st.expander("Que significa cada parte", expanded=True):
         - **Etiqueta final**: resume las etiquetas IA asignadas para los dos marcos normativos.
         - **Restaurar marco 1 / Restaurar marco 2**: vuelve a poner las etiquetas originales si cambiaste algo y quieres empezar de nuevo.
         - **Procesar**: crea el Excel final.
-        - **Archivo madre etiquetado**: el unico archivo de salida. Contiene una fila por parrafo, evidencia por diccionario, clasificacion IA por marco, justificacion cuantitativa y etiqueta final.
+        - **Archivo madre etiquetado**: el unico archivo de salida. Contiene una fila por parrafo, evidencia por diccionario, clasificacion IA por marco, indicios textuales, razonamiento IA y etiqueta final.
         """
     )
 
@@ -588,7 +608,10 @@ if process_clicked:
                 norm_labels["codigo_diccionario"],
                 norm_labels["etiqueta_ia_ley_19_2013"],
                 norm_labels["etiqueta_ia_codigo_deontologico"],
-                norm_labels["justificacion_ia"],
+                norm_labels["justificacion_ia_ley_19_2013"],
+                norm_labels["justificacion_ia_codigo_deontologico"],
+                norm_labels["razonamiento_ia_ley_19_2013"],
+                norm_labels["razonamiento_ia_codigo_deontologico"],
                 norm_labels["etiqueta_final"],
             ]
         )
@@ -599,7 +622,10 @@ if process_clicked:
                 f"{icom_name}_diccionario": norm_labels["codigo_diccionario"],
                 "etiqueta_ia_ley_19_2013": norm_labels["etiqueta_ia_ley_19_2013"],
                 "etiqueta_ia_codigo_deontologico": norm_labels["etiqueta_ia_codigo_deontologico"],
-                "justificacion_ia": norm_labels["justificacion_ia"],
+                "justificacion_ia_ley_19_2013": norm_labels["justificacion_ia_ley_19_2013"],
+                "justificacion_ia_codigo_deontologico": norm_labels["justificacion_ia_codigo_deontologico"],
+                "razonamiento_ia_ley_19_2013": norm_labels["razonamiento_ia_ley_19_2013"],
+                "razonamiento_ia_codigo_deontologico": norm_labels["razonamiento_ia_codigo_deontologico"],
                 "etiqueta_final": norm_labels["etiqueta_final"],
             }
         )
@@ -612,7 +638,10 @@ if process_clicked:
             f"{icom_name}_diccionario",
             "etiqueta_ia_ley_19_2013",
             "etiqueta_ia_codigo_deontologico",
-            "justificacion_ia",
+            "justificacion_ia_ley_19_2013",
+            "justificacion_ia_codigo_deontologico",
+            "razonamiento_ia_ley_19_2013",
+            "razonamiento_ia_codigo_deontologico",
             "etiqueta_final",
         ],
     )
