@@ -7,7 +7,7 @@ import json
 import re
 import urllib.error
 import urllib.request
-from typing import Dict, List
+from typing import Dict, List, Optional, Tuple
 
 import streamlit as st
 from openpyxl import Workbook
@@ -16,9 +16,13 @@ from openpyxl.styles import Alignment, Font
 from spanish_kmedoids_10 import (
     ICOM_KEYWORDS,
     LEY_19_2013_KEYWORDS,
+    cosine_distance_matrix,
+    improve_medoids,
+    initialize_medoids,
     keyword_labels,
+    medoid_cost,
     normalize_for_keywords,
-    select_k_medoids_paragraphs,
+    tfidf_vectors,
 )
 
 
@@ -69,7 +73,125 @@ def split_sentences_or_paragraphs(text: str) -> List[str]:
     return [sentence for sentence in sentences if is_legible_paragraph(sentence)]
 
 
-def make_excel_bytes(rows: List[List], header: List[str]) -> bytes:
+def elbow_candidate_values(total_items: int, min_k: int = 30, max_k: int = 90) -> List[int]:
+    if total_items <= 0:
+        return []
+    if total_items <= min_k:
+        return [total_items]
+
+    upper = min(max_k, total_items)
+    candidates = list(range(min_k, upper + 1, 10))
+    if upper not in candidates:
+        candidates.append(upper)
+    return sorted(set(candidates))
+
+
+def choose_elbow_k(cost_rows: List[Dict[str, object]]) -> int:
+    if len(cost_rows) <= 2:
+        return int(cost_rows[0]["k"])
+
+    first = cost_rows[0]
+    last = cost_rows[-1]
+    x1, y1 = float(first["k"]), float(first["coste"])
+    x2, y2 = float(last["k"]), float(last["coste"])
+    denominator = ((y2 - y1) ** 2 + (x2 - x1) ** 2) ** 0.5
+    if denominator == 0:
+        return int(first["k"])
+
+    best_row = first
+    best_distance = -1.0
+    for row in cost_rows[1:-1]:
+        x0, y0 = float(row["k"]), float(row["coste"])
+        distance = abs((y2 - y1) * x0 - (x2 - x1) * y0 + x2 * y1 - y2 * x1) / denominator
+        if distance > best_distance:
+            best_distance = distance
+            best_row = row
+    return int(best_row["k"])
+
+
+def select_k_medoids_with_elbow(
+    paragraphs: List[str],
+    min_k: int = 30,
+    max_k: int = 90,
+) -> Tuple[List[str], List[Dict[str, object]], Dict[str, object]]:
+    total_items = len(paragraphs)
+    candidates = elbow_candidate_values(total_items, min_k=min_k, max_k=max_k)
+    if not candidates:
+        return [], [], {
+            "parrafos_validos": 0,
+            "k_minimo": min_k,
+            "k_maximo": max_k,
+            "k_optimo": 0,
+            "criterio": "sin parrafos validos",
+        }
+
+    if total_items <= min_k:
+        selected_k = total_items
+        return paragraphs, [
+            {
+                "k": selected_k,
+                "coste": 0.0,
+                "mejora_absoluta": 0.0,
+                "mejora_relativa": 0.0,
+                "seleccionado": True,
+            }
+        ], {
+            "parrafos_validos": total_items,
+            "k_minimo": min_k,
+            "k_maximo": max_k,
+            "k_optimo": selected_k,
+            "criterio": "se devuelven todos los parrafos validos porque N es menor o igual al minimo",
+        }
+
+    vectors = tfidf_vectors(paragraphs)
+    distances = cosine_distance_matrix(vectors)
+    cost_rows = []
+    medoids_by_k = {}
+
+    for candidate_k in candidates:
+        medoids = initialize_medoids(distances, candidate_k)
+        medoids = improve_medoids(distances, medoids, max_iter=5)
+        cost = medoid_cost(distances, medoids)
+        medoids_by_k[candidate_k] = medoids
+        cost_rows.append(
+            {
+                "k": candidate_k,
+                "coste": round(cost, 6),
+                "mejora_absoluta": 0.0,
+                "mejora_relativa": 0.0,
+                "seleccionado": False,
+            }
+        )
+
+    previous_cost = None
+    for row in cost_rows:
+        current_cost = float(row["coste"])
+        if previous_cost is not None:
+            improvement = previous_cost - current_cost
+            row["mejora_absoluta"] = round(improvement, 6)
+            row["mejora_relativa"] = round(improvement / previous_cost, 6) if previous_cost else 0.0
+        previous_cost = current_cost
+
+    selected_k = choose_elbow_k(cost_rows)
+    for row in cost_rows:
+        row["seleccionado"] = int(row["k"]) == selected_k
+
+    selected_items = [paragraphs[index] for index in medoids_by_k[selected_k]]
+    return selected_items, cost_rows, {
+        "parrafos_validos": total_items,
+        "k_minimo": min_k,
+        "k_maximo": max_k,
+        "k_optimo": selected_k,
+        "criterio": "metodo del codo sobre coste intra-cluster de K-medoides",
+    }
+
+
+def make_excel_bytes(
+    rows: List[List],
+    header: List[str],
+    elbow_rows: Optional[List[Dict[str, object]]] = None,
+    elbow_summary: Optional[Dict[str, object]] = None,
+) -> bytes:
     buf = io.BytesIO()
     wb = Workbook()
     ws = wb.active
@@ -87,9 +209,38 @@ def make_excel_bytes(rows: List[List], header: List[str]) -> bytes:
         for cell in row:
             cell.alignment = Alignment(wrap_text=True, vertical="top")
 
-    widths = [90, 35, 35, 35, 18, 55, 35, 35]
+    widths = [90, 35, 35, 35, 35, 55, 55, 65, 65, 35]
     for index, width in enumerate(widths, start=1):
         ws.column_dimensions[chr(64 + index)].width = width
+
+    if elbow_rows is not None and elbow_summary is not None:
+        ws_elbow = wb.create_sheet("metodo_codo")
+        ws_elbow.append(["criterio", "valor"])
+        for key, value in elbow_summary.items():
+            ws_elbow.append([key, value])
+        ws_elbow.append([])
+        ws_elbow.append(["k", "coste", "mejora_absoluta", "mejora_relativa", "seleccionado"])
+        for row in elbow_rows:
+            ws_elbow.append(
+                [
+                    row["k"],
+                    row["coste"],
+                    row["mejora_absoluta"],
+                    row["mejora_relativa"],
+                    "si" if row["seleccionado"] else "",
+                ]
+            )
+        for row in ws_elbow.iter_rows():
+            for cell in row:
+                cell.alignment = Alignment(wrap_text=True, vertical="top")
+        for cell in ws_elbow[1]:
+            cell.font = Font(bold=True)
+        ws_elbow.column_dimensions["A"].width = 28
+        ws_elbow.column_dimensions["B"].width = 45
+        ws_elbow.column_dimensions["C"].width = 20
+        ws_elbow.column_dimensions["D"].width = 20
+        ws_elbow.column_dimensions["E"].width = 15
+
     wb.save(buf)
     return buf.getvalue()
 
@@ -476,14 +627,14 @@ with st.expander("Que significa cada parte", expanded=True):
         """
         - **Pegar texto**: pega aqui el contenido de una memoria si quieres probar sin subir archivo.
         - **Subir archivo .txt/.md**: carga una memoria completa desde tu ordenador.
-        - **Numero de K medoides**: cantidad de parrafos representativos que quieres obtener. Si pones 24, el Excel tendra 24 parrafos.
+        - **Metodo del codo**: calcula automaticamente el numero de parrafos representativos, con minimo 30 y maximo 90.
         - **Nombre de la ley o marco 1**: cambia aqui Ley 19/2013 por cualquier otra ley o marco que quieras analizar.
         - **Nombre del marco 2**: puedes dejar Codigo deontologico ICOM o cambiarlo por otro marco.
         - **Etiquetas y palabras clave**: escribe una etiqueta por linea con este formato: etiqueta = palabra1, palabra2, palabra3.
         - **Etiqueta final**: resume las etiquetas IA asignadas para los dos marcos normativos.
         - **Restaurar marco 1 / Restaurar marco 2**: vuelve a poner las etiquetas originales si cambiaste algo y quieres empezar de nuevo.
         - **Procesar**: crea el Excel final.
-        - **Archivo madre etiquetado**: el unico archivo de salida. Contiene una fila por parrafo, evidencia por diccionario, clasificacion IA por marco, indicios textuales, razonamiento IA y etiqueta final.
+        - **Archivo madre etiquetado**: el unico archivo de salida. Contiene una fila por parrafo, evidencia por diccionario, clasificacion IA por marco, indicios textuales, razonamiento IA y etiqueta final. Incluye una hoja aparte con el detalle del metodo del codo.
         """
     )
 
@@ -561,16 +712,9 @@ if not icom_taxonomy:
     st.warning("El marco 2 no tiene etiquetas validas. Usa el formato: etiqueta = palabra1, palabra2")
 
 st.subheader("Cantidad de parrafos representativos")
-k_medoids = st.number_input(
-    "Numero de K medoides",
-    min_value=1,
-    max_value=200,
-    value=24,
-    step=1,
-    help=(
-        "Controla cuantos parrafos representativos apareceran en el Excel final. "
-        "Por ejemplo: si pones 24, el Excel tendra 24 parrafos."
-    ),
+st.info(
+    "La app calcula automaticamente el K optimo con metodo del codo. "
+    "Se usa un minimo operativo de 30 y un maximo de 90 parrafos representativos."
 )
 
 st.subheader("Clasificacion automatizada con IA")
@@ -618,7 +762,11 @@ if process_clicked:
         )
         st.stop()
 
-    selected_items = select_k_medoids_paragraphs(items, k=int(k_medoids), seed=42)
+    selected_items, elbow_rows, elbow_summary = select_k_medoids_with_elbow(
+        items,
+        min_k=30,
+        max_k=90,
+    )
     master_rows = []
     preview_rows = []
 
@@ -673,10 +821,15 @@ if process_clicked:
             "razonamiento_ia_codigo_deontologico",
             "etiqueta_final",
         ],
+        elbow_rows=elbow_rows,
+        elbow_summary=elbow_summary,
     )
 
     excel_mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    st.success(f"Archivo madre listo con {len(selected_items)} parrafos representativos.")
+    st.success(
+        f"Archivo madre listo con {len(selected_items)} parrafos representativos "
+        f"(K optimo por codo = {elbow_summary['k_optimo']})."
+    )
     st.download_button(
         "Descargar archivo_madre_etiquetado.xlsx",
         data=master_excel_bytes,
