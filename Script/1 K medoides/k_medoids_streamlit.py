@@ -227,6 +227,46 @@ def taxonomy_options_text(
     return "\n".join(lines)
 
 
+def keyword_hits_for_label(text: str, taxonomy: Dict[str, List[str]], label: str) -> List[str]:
+    if label == "indeterminado" or label not in taxonomy:
+        return []
+    normalized_text = normalize_for_keywords(text)
+    return [
+        keyword
+        for keyword in taxonomy[label]
+        if normalize_for_keywords(keyword) in normalized_text
+    ]
+
+
+def quantitative_ia_justification(
+    paragraph: str,
+    law_taxonomy: Dict[str, List[str]],
+    icom_taxonomy: Dict[str, List[str]],
+    law_label: str,
+    icom_label: str,
+) -> str:
+    law_hits = keyword_hits_for_label(paragraph, law_taxonomy, law_label)
+    icom_hits = keyword_hits_for_label(paragraph, icom_taxonomy, icom_label)
+    law_total = len(law_taxonomy.get(law_label, []))
+    icom_total = len(icom_taxonomy.get(icom_label, []))
+
+    law_summary = (
+        f"Ley 19/2013: {law_label} ({len(law_hits)}/{law_total} indicios lexicos)"
+        if law_label != "indeterminado"
+        else "Ley 19/2013: indeterminado (0 indicios suficientes)"
+    )
+    icom_summary = (
+        f"Codigo deontologico: {icom_label} ({len(icom_hits)}/{icom_total} indicios lexicos)"
+        if icom_label != "indeterminado"
+        else "Codigo deontologico: indeterminado (0 indicios suficientes)"
+    )
+    return (
+        "Codificacion manual simulada: "
+        f"{law_summary}; {icom_summary}. "
+        "La asignacion se basa en la concentracion relativa de evidencias textuales del parrafo."
+    )
+
+
 def extract_json_object(text: str) -> Dict[str, object]:
     try:
         return json.loads(text)
@@ -253,11 +293,14 @@ def classify_with_ollama(
     )
     valid_law_labels = set(law_display_taxonomy)
     valid_icom_labels = set(icom_display_taxonomy)
-    valid_labels = valid_law_labels.union(valid_icom_labels).union({"indeterminado"})
     prompt = f"""
 Eres un clasificador academico para una tesis doctoral.
-Debes leer el parrafo y asignar UNA etiqueta dentro de una taxonomia cerrada.
-No inventes etiquetas. Si ninguna etiqueta corresponde razonablemente, usa "indeterminado".
+Debes leer el parrafo y asignar DOS etiquetas independientes dentro de taxonomias cerradas:
+1. Una etiqueta segun Ley 19/2013.
+2. Una etiqueta segun Codigo deontologico de museos.
+
+No inventes etiquetas. Si ninguna etiqueta corresponde razonablemente en una taxonomia, usa "indeterminado" para esa taxonomia.
+Actua como una persona codificadora que revisa evidencias textuales y asigna categorias normativas.
 
 Taxonomia cerrada:
 {taxonomy_options_text(law_prompt_taxonomy, icom_prompt_taxonomy)}
@@ -267,10 +310,8 @@ Parrafo:
 
 Responde solo JSON valido con este esquema:
 {{
-  "marco_ia": "LEY_19_2013|CODIGO_MUSEOS|indeterminado",
-  "etiqueta_ia": "una etiqueta exacta de la taxonomia o indeterminado",
-  "confianza_ia": 0.0,
-  "justificacion_ia": "una frase breve en espanol"
+  "etiqueta_ia_ley_19_2013": "una etiqueta exacta de LEY_19_2013 o indeterminado",
+  "etiqueta_ia_codigo_deontologico": "una etiqueta exacta de CODIGO_MUSEOS o indeterminado"
 }}
 """
     payload = {
@@ -292,35 +333,28 @@ Responde solo JSON valido con este esquema:
         parsed = extract_json_object(raw.get("response", "{}"))
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, KeyError) as exc:
         return {
-            "marco_ia": "indeterminado",
-            "etiqueta_ia": "indeterminado",
-            "confianza_ia": "0.00",
+            "etiqueta_ia_ley_19_2013": "indeterminado",
+            "etiqueta_ia_codigo_deontologico": "indeterminado",
             "justificacion_ia": f"Error al consultar Ollama: {exc}",
         }
 
-    etiqueta = str(parsed.get("etiqueta_ia", "indeterminado")).strip()
-    marco = str(parsed.get("marco_ia", "indeterminado")).strip()
-    if etiqueta not in valid_labels:
-        etiqueta = "indeterminado"
-        marco = "indeterminado"
-    elif etiqueta in valid_law_labels:
-        marco = "LEY_19_2013"
-    elif etiqueta in valid_icom_labels:
-        marco = "CODIGO_MUSEOS"
-    else:
-        marco = "indeterminado"
-
-    try:
-        confidence = float(parsed.get("confianza_ia", 0.0))
-    except (TypeError, ValueError):
-        confidence = 0.0
-    confidence = min(max(confidence, 0.0), 1.0)
+    law_label = str(parsed.get("etiqueta_ia_ley_19_2013", "indeterminado")).strip()
+    icom_label = str(parsed.get("etiqueta_ia_codigo_deontologico", "indeterminado")).strip()
+    if law_label not in valid_law_labels:
+        law_label = "indeterminado"
+    if icom_label not in valid_icom_labels:
+        icom_label = "indeterminado"
 
     return {
-        "marco_ia": marco,
-        "etiqueta_ia": etiqueta,
-        "confianza_ia": f"{confidence:.2f}",
-        "justificacion_ia": str(parsed.get("justificacion_ia", "")).strip(),
+        "etiqueta_ia_ley_19_2013": law_label,
+        "etiqueta_ia_codigo_deontologico": icom_label,
+        "justificacion_ia": quantitative_ia_justification(
+            paragraph,
+            law_taxonomy,
+            icom_taxonomy,
+            law_label,
+            icom_label,
+        ),
     }
 
 
@@ -330,33 +364,24 @@ def automated_labeling_columns(
     icom_taxonomy: Dict[str, List[str]],
     model: str,
     ollama_url: str,
-    high_confidence: float,
 ) -> Dict[str, str]:
     law_labels = keyword_labels(text, law_taxonomy)
     icom_labels = keyword_labels(text, icom_taxonomy)
     ia_labels = classify_with_ollama(text, law_taxonomy, icom_taxonomy, model, ollama_url)
-    dict_labels = [label_to_display(label) for label in law_labels + icom_labels]
-    confidence = float(ia_labels["confianza_ia"])
-
-    if ia_labels["etiqueta_ia"] != "indeterminado" and confidence >= high_confidence:
-        final_label = ia_labels["etiqueta_ia"]
-        if final_label in dict_labels:
-            decision_rule = "coincidencia_diccionario_ia"
-        else:
-            decision_rule = "ia_confianza_alta"
-    elif dict_labels:
-        final_label = ", ".join(dict_labels)
-        decision_rule = "diccionario_por_confianza_ia_baja"
-    else:
-        final_label = "indeterminado"
-        decision_rule = "sin_etiqueta_confiable"
+    final_candidates = [
+        ia_labels["etiqueta_ia_ley_19_2013"],
+        ia_labels["etiqueta_ia_codigo_deontologico"],
+    ]
+    final_label = ", ".join(label for label in final_candidates if label != "indeterminado")
+    if not final_label:
+        dict_labels = [label_to_display(label) for label in law_labels + icom_labels]
+        final_label = ", ".join(dict_labels) if dict_labels else "indeterminado"
 
     return {
         "ley_diccionario": join_display_labels(law_labels),
         "codigo_diccionario": join_display_labels(icom_labels),
         **ia_labels,
         "etiqueta_final": final_label,
-        "regla_decision": decision_rule,
     }
 
 
@@ -406,10 +431,10 @@ with st.expander("Que significa cada parte", expanded=True):
         - **Nombre de la ley o marco 1**: cambia aqui Ley 19/2013 por cualquier otra ley o marco que quieras analizar.
         - **Nombre del marco 2**: puedes dejar Codigo deontologico ICOM o cambiarlo por otro marco.
         - **Etiquetas y palabras clave**: escribe una etiqueta por linea con este formato: etiqueta = palabra1, palabra2, palabra3.
-        - **Etiqueta final**: combina evidencia por diccionario y clasificacion IA mediante una regla automatica de decision.
+        - **Etiqueta final**: resume las etiquetas IA asignadas para los dos marcos normativos.
         - **Restaurar marco 1 / Restaurar marco 2**: vuelve a poner las etiquetas originales si cambiaste algo y quieres empezar de nuevo.
         - **Procesar**: crea el Excel final.
-        - **Archivo madre etiquetado**: el unico archivo de salida. Contiene una fila por parrafo, evidencia por diccionario, clasificacion IA, etiqueta final y regla de decision.
+        - **Archivo madre etiquetado**: el unico archivo de salida. Contiene una fila por parrafo, evidencia por diccionario, clasificacion IA por marco, justificacion cuantitativa y etiqueta final.
         """
     )
 
@@ -418,7 +443,8 @@ with st.expander("Nota metodologica", expanded=False):
         """
         La version actual usa una clasificacion automatizada con taxonomia
         cerrada: el diccionario conserva evidencia textual y la IA asigna
-        una etiqueta interpretativa sin poder inventar categorias nuevas.
+        una etiqueta interpretativa para Ley 19/2013 y otra para el Codigo
+        deontologico, sin poder inventar categorias nuevas.
         """
     )
 
@@ -509,18 +535,6 @@ ollama_url = st.text_input(
     value="http://127.0.0.1:11434",
     help="Endpoint del servidor Ollama. En el remoto normalmente se deja como 127.0.0.1.",
 )
-high_confidence = st.slider(
-    "Umbral de confianza IA para etiqueta final",
-    min_value=0.50,
-    max_value=0.95,
-    value=0.70,
-    step=0.05,
-    help=(
-        "Si la IA iguala o supera este valor, su etiqueta pasa a etiqueta_final. "
-        "Si no, se usa el diccionario cuando exista evidencia."
-    ),
-)
-
 st.write(
     "**Entrada de texto** (pega tu texto o sube un .txt/.md). Si hay saltos "
     "de linea, se usan como parrafos; si no, se segmenta por oraciones."
@@ -566,19 +580,16 @@ if process_clicked:
             icom_taxonomy,
             ollama_model,
             ollama_url,
-            high_confidence,
         )
         master_rows.append(
             [
                 paragraph,
                 norm_labels["ley_diccionario"],
                 norm_labels["codigo_diccionario"],
-                norm_labels["etiqueta_ia"],
-                norm_labels["marco_ia"],
-                norm_labels["confianza_ia"],
+                norm_labels["etiqueta_ia_ley_19_2013"],
+                norm_labels["etiqueta_ia_codigo_deontologico"],
                 norm_labels["justificacion_ia"],
                 norm_labels["etiqueta_final"],
-                norm_labels["regla_decision"],
             ]
         )
         preview_rows.append(
@@ -586,12 +597,10 @@ if process_clicked:
                 "parrafo": paragraph,
                 f"{law_name}_diccionario": norm_labels["ley_diccionario"],
                 f"{icom_name}_diccionario": norm_labels["codigo_diccionario"],
-                "etiqueta_ia": norm_labels["etiqueta_ia"],
-                "marco_ia": norm_labels["marco_ia"],
-                "confianza_ia": norm_labels["confianza_ia"],
+                "etiqueta_ia_ley_19_2013": norm_labels["etiqueta_ia_ley_19_2013"],
+                "etiqueta_ia_codigo_deontologico": norm_labels["etiqueta_ia_codigo_deontologico"],
                 "justificacion_ia": norm_labels["justificacion_ia"],
                 "etiqueta_final": norm_labels["etiqueta_final"],
-                "regla_decision": norm_labels["regla_decision"],
             }
         )
 
@@ -601,12 +610,10 @@ if process_clicked:
             "parrafo",
             f"{law_name}_diccionario",
             f"{icom_name}_diccionario",
-            "etiqueta_ia",
-            "marco_ia",
-            "confianza_ia",
+            "etiqueta_ia_ley_19_2013",
+            "etiqueta_ia_codigo_deontologico",
             "justificacion_ia",
             "etiqueta_final",
-            "regla_decision",
         ],
     )
 
