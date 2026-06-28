@@ -270,6 +270,24 @@ def fallback_reasoning(framework_name: str, label: str) -> str:
     )
 
 
+def contains_english_markers(text: str) -> bool:
+    english_markers = {
+        "because", "paragraph", "label", "category", "evidence", "text", "matches",
+        "does not", "information", "public", "transparency", "collection", "reason",
+        "assigned", "according", "law", "code", "museum", "museums",
+    }
+    normalized = normalize_for_keywords(text)
+    words = set(re.findall(r"\b[a-z]{3,}\b", normalized))
+    return bool(words.intersection(english_markers))
+
+
+def spanish_reasoning_or_fallback(text: str, framework_name: str, label: str) -> str:
+    text = text.strip()
+    if not text or contains_english_markers(text):
+        return fallback_reasoning(framework_name, label)
+    return text
+
+
 def extract_json_object(text: str) -> Dict[str, object]:
     try:
         return json.loads(text)
@@ -304,6 +322,9 @@ Debes leer el parrafo y asignar DOS etiquetas independientes dentro de taxonomia
 
 No inventes etiquetas. Si ninguna etiqueta corresponde razonablemente en una taxonomia, usa "indeterminado" para esa taxonomia.
 Actua como una persona codificadora que revisa evidencias textuales y asigna categorias normativas.
+Todos los campos textuales deben estar escritos exclusivamente en espanol.
+No uses palabras, frases ni conectores en ingles.
+No traduzcas los nombres de las etiquetas: mantenlos exactamente como aparecen en la taxonomia.
 
 Taxonomia cerrada:
 {taxonomy_options_text(law_prompt_taxonomy, icom_prompt_taxonomy)}
@@ -373,8 +394,16 @@ Responde solo JSON valido con este esquema:
             icom_hits,
             len(icom_taxonomy.get(icom_label, [])),
         ),
-        "razonamiento_ia_ley_19_2013": law_reasoning or fallback_reasoning("Ley 19/2013", law_label),
-        "razonamiento_ia_codigo_deontologico": icom_reasoning or fallback_reasoning("Codigo deontologico", icom_label),
+        "razonamiento_ia_ley_19_2013": spanish_reasoning_or_fallback(
+            law_reasoning,
+            "Ley 19/2013",
+            law_label,
+        ),
+        "razonamiento_ia_codigo_deontologico": spanish_reasoning_or_fallback(
+            icom_reasoning,
+            "Codigo deontologico",
+            icom_label,
+        ),
     }
 
 
