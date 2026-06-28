@@ -439,6 +439,13 @@ def spanish_reasoning_or_fallback(text: str, framework_name: str, label: str) ->
     return text
 
 
+def clip_for_ia(text: str, max_chars: int = 1200) -> str:
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars].rsplit(" ", 1)[0] + " [...]"
+
+
 def extract_json_object(text: str) -> Dict[str, object]:
     try:
         return json.loads(text)
@@ -481,14 +488,12 @@ Taxonomia cerrada:
 {taxonomy_options_text(law_prompt_taxonomy, icom_prompt_taxonomy)}
 
 Parrafo:
-\"\"\"{paragraph}\"\"\"
+\"\"\"{clip_for_ia(paragraph)}\"\"\"
 
 Responde solo JSON valido con este esquema:
 {{
   "etiqueta_ia_ley_19_2013": "una etiqueta exacta de LEY_19_2013 o indeterminado",
-  "etiqueta_ia_codigo_deontologico": "una etiqueta exacta de CODIGO_MUSEOS o indeterminado",
-  "razonamiento_ia_ley_19_2013": "una explicacion breve y clara de por que el parrafo encaja o no encaja con la etiqueta de Ley 19/2013",
-  "razonamiento_ia_codigo_deontologico": "una explicacion breve y clara de por que el parrafo encaja o no encaja con la etiqueta del Codigo deontologico"
+  "etiqueta_ia_codigo_deontologico": "una etiqueta exacta de CODIGO_MUSEOS o indeterminado"
 }}
 """
     payload = {
@@ -505,7 +510,7 @@ Responde solo JSON valido con este esquema:
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=120) as response:
+        with urllib.request.urlopen(request, timeout=45) as response:
             raw = json.loads(response.read().decode("utf-8", errors="replace"))
         parsed = extract_json_object(raw.get("response", "{}"))
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, KeyError) as exc:
@@ -527,9 +532,6 @@ Responde solo JSON valido con este esquema:
 
     law_hits = keyword_hits_for_label(paragraph, law_taxonomy, law_label)
     icom_hits = keyword_hits_for_label(paragraph, icom_taxonomy, icom_label)
-    law_reasoning = str(parsed.get("razonamiento_ia_ley_19_2013", "")).strip()
-    icom_reasoning = str(parsed.get("razonamiento_ia_codigo_deontologico", "")).strip()
-
     return {
         "etiqueta_ia_ley_19_2013": law_label,
         "etiqueta_ia_codigo_deontologico": icom_label,
@@ -545,16 +547,8 @@ Responde solo JSON valido con este esquema:
             icom_hits,
             len(icom_taxonomy.get(icom_label, [])),
         ),
-        "razonamiento_ia_ley_19_2013": spanish_reasoning_or_fallback(
-            law_reasoning,
-            "Ley 19/2013",
-            law_label,
-        ),
-        "razonamiento_ia_codigo_deontologico": spanish_reasoning_or_fallback(
-            icom_reasoning,
-            "Codigo deontologico",
-            icom_label,
-        ),
+        "razonamiento_ia_ley_19_2013": fallback_reasoning("Ley 19/2013", law_label),
+        "razonamiento_ia_codigo_deontologico": fallback_reasoning("Codigo deontologico", icom_label),
     }
 
 
@@ -769,8 +763,13 @@ if process_clicked:
     )
     master_rows = []
     preview_rows = []
+    progress_bar = st.progress(0)
+    progress_text = st.empty()
 
-    for paragraph in selected_items:
+    for index, paragraph in enumerate(selected_items, start=1):
+        progress_text.write(
+            f"Clasificando parrafo {index} de {len(selected_items)} con IA local..."
+        )
         norm_labels = automated_labeling_columns(
             paragraph,
             law_taxonomy,
@@ -806,6 +805,9 @@ if process_clicked:
                 "etiqueta_final": norm_labels["etiqueta_final"],
             }
         )
+        progress_bar.progress(index / len(selected_items))
+
+    progress_text.empty()
 
     master_excel_bytes = make_excel_bytes(
         master_rows,
