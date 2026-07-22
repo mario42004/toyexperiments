@@ -38,6 +38,11 @@ STOPWORDS = {
     "informacion", "transparencia", "dimension", "codigo", "marco", "temas",
     "institucion", "institucional", "museo", "museos",
 }
+SPANISH_FUNCTION_WORDS = {
+    "al", "como", "con", "del", "desde", "el", "ella", "en", "entre",
+    "esta", "este", "fue", "ha", "han", "las", "los", "para", "por",
+    "que", "se", "sin", "son", "su", "sus", "tambien", "una", "y",
+}
 
 
 def is_legible_paragraph(text: str) -> bool:
@@ -49,15 +54,22 @@ def is_legible_paragraph(text: str) -> bool:
     table_tokens = re.findall(r"\b(?:td|tr|lt|gt)\b", text.lower())
     all_tokens = re.findall(r"\b\w+\b", text.lower())
 
-    if len(letters) < 12:
+    normalized_words = re.findall(r"\b[a-z]+\b", normalize_for_keywords(text))
+    spanish_markers = sum(word in SPANISH_FUNCTION_WORDS for word in normalized_words)
+
+    if len(letters) < 40:
         return False
-    if len(words) < 4:
+    if len(words) < 20:
+        return False
+    if text.rstrip().endswith(":"):
         return False
     if len(table_tokens) >= 3:
         return False
     if len(numeric_tokens) > len(words):
         return False
     if len(short_tokens) / max(len(all_tokens), 1) > 0.35:
+        return False
+    if spanish_markers < 2:
         return False
     return len(letters) / max(len(visible_chars), 1) >= 0.45
 
@@ -310,7 +322,7 @@ def select_candidate_taxonomies(
     max_candidates: int = 18,
 ) -> tuple[Dict[str, List[str]], Dict[str, List[str]]]:
     paragraph_tokens = tokens_for_candidate_selection(paragraph)
-    scored = []
+    scored_by_framework = {"ley": [], "icom": []}
     for marco, taxonomy in [("ley", law_taxonomy), ("icom", icom_taxonomy)]:
         for label, keywords in taxonomy.items():
             display_label = label_to_display(label)
@@ -318,20 +330,36 @@ def select_candidate_taxonomies(
             overlap = paragraph_tokens.intersection(candidate_tokens)
             if overlap:
                 score = len(overlap)
-                scored.append((score, marco, display_label, keywords))
+                scored_by_framework[marco].append((score, display_label, keywords))
 
-    if not scored:
-        return {}, display_taxonomy(icom_taxonomy)
+    def best_candidates(
+        framework: str,
+        taxonomy: Dict[str, List[str]],
+    ) -> Dict[str, List[str]]:
+        scored = sorted(scored_by_framework[framework], reverse=True)
+        if scored:
+            return {label: keywords for _, label, keywords in scored[:max_candidates]}
+        # Si no hay coincidencia literal, se ofrece el marco completo para que
+        # el modelo pueda decidir por semejanza semantica, no a partir de una
+        # lista vacia que obligaria a responder "indeterminado".
+        return display_taxonomy(taxonomy)
 
-    scored.sort(reverse=True)
-    law_candidates = {}
-    icom_candidates = {}
-    for _, marco, label, keywords in scored[:max_candidates]:
-        if marco == "ley":
-            law_candidates[label] = keywords
-        else:
-            icom_candidates[label] = keywords
-    return law_candidates, icom_candidates
+    return (
+        best_candidates("ley", law_taxonomy),
+        best_candidates("icom", icom_taxonomy),
+    )
+
+
+def resolve_model_label(raw_label: object, valid_labels: set[str]) -> str:
+    label = str(raw_label or "").strip()
+    if label in valid_labels or label == "indeterminado":
+        return label
+    normalized_label = normalize_for_keywords(label.replace("_", " "))
+    normalized_valid = {
+        normalize_for_keywords(valid.replace("_", " ")): valid
+        for valid in valid_labels
+    }
+    return normalized_valid.get(normalized_label, "indeterminado")
 
 
 def taxonomy_to_text(taxonomy: Dict[str, List[str]]) -> str:
@@ -480,7 +508,7 @@ Debes leer el parrafo y asignar DOS etiquetas independientes dentro de taxonomia
 1. Una etiqueta segun Ley 19/2013.
 2. Una etiqueta segun Codigo deontologico de museos.
 
-No inventes etiquetas. Si ninguna etiqueta corresponde razonablemente en una taxonomia, usa "indeterminado" para esa taxonomia.
+No inventes etiquetas. Elige la etiqueta mas proxima por significado, aunque no aparezcan literalmente sus palabras clave. Usa "indeterminado" solo cuando el parrafo sea realmente ajeno a todas las categorias del marco, no cuando exista una correspondencia semantica razonable.
 Actua como una persona codificadora que revisa evidencias textuales y asigna categorias normativas.
 Todos los campos textuales deben estar escritos exclusivamente en espanol.
 No uses palabras, frases ni conectores en ingles.
@@ -525,12 +553,12 @@ Responde solo JSON valido con este esquema:
             "razonamiento_ia_codigo_deontologico": "No se pudo generar razonamiento porque fallo la consulta a Ollama.",
         }
 
-    law_label = str(parsed.get("etiqueta_ia_ley_19_2013", "indeterminado")).strip()
-    icom_label = str(parsed.get("etiqueta_ia_codigo_deontologico", "indeterminado")).strip()
-    if law_label not in valid_law_labels:
-        law_label = "indeterminado"
-    if icom_label not in valid_icom_labels:
-        icom_label = "indeterminado"
+    law_label = resolve_model_label(
+        parsed.get("etiqueta_ia_ley_19_2013"), valid_law_labels
+    )
+    icom_label = resolve_model_label(
+        parsed.get("etiqueta_ia_codigo_deontologico"), valid_icom_labels
+    )
 
     law_hits = keyword_hits_for_label(paragraph, law_taxonomy, law_label)
     icom_hits = keyword_hits_for_label(paragraph, icom_taxonomy, icom_label)
@@ -750,18 +778,36 @@ if process_clicked:
         st.error("Por favor, introduce texto o sube un .txt.")
         st.stop()
 
-    items = split_sentences_or_paragraphs(texto)
-    if len(items) == 0:
+    legible_items = split_sentences_or_paragraphs(texto)
+    if len(legible_items) == 0:
         st.error(
             "No se detectaron parrafos con suficiente texto legible. "
             "Se descartan fragmentos compuestos solo por numeros, codigos o signos."
         )
         st.stop()
 
+    relevant_items = [
+        paragraph
+        for paragraph in legible_items
+        if keyword_labels(paragraph, law_taxonomy)
+        or keyword_labels(paragraph, icom_taxonomy)
+    ]
+    # Para un analisis normativo, los medoides se calculan sobre los parrafos
+    # que contienen alguna evidencia de los marcos. Si hay muy pocos, se usa
+    # el conjunto legible completo para no fabricar una muestra insuficiente.
+    items = relevant_items if len(relevant_items) >= 30 else legible_items
+
     selected_items, elbow_rows, elbow_summary = select_k_medoids_with_elbow(
         items,
         min_k=30,
         max_k=90,
+    )
+    elbow_summary["parrafos_legibles_antes_del_filtro_normativo"] = len(legible_items)
+    elbow_summary["parrafos_con_evidencia_normativa"] = len(relevant_items)
+    elbow_summary["universo_usado_para_k_medoides"] = (
+        "parrafos con evidencia normativa"
+        if items is relevant_items
+        else "todos los parrafos legibles (menos de 30 con evidencia normativa)"
     )
     master_rows = []
     preview_rows = []
