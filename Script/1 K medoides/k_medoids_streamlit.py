@@ -5,8 +5,10 @@ from __future__ import annotations
 import io
 import json
 import re
+import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Optional, Tuple
 
 import streamlit as st
@@ -765,18 +767,36 @@ if process_clicked:
     preview_rows = []
     progress_bar = st.progress(0)
     progress_text = st.empty()
+    started_at = time.perf_counter()
 
-    for index, paragraph in enumerate(selected_items, start=1):
-        progress_text.write(
-            f"Clasificando parrafo {index} de {len(selected_items)} con IA local..."
-        )
-        norm_labels = automated_labeling_columns(
-            paragraph,
-            law_taxonomy,
-            icom_taxonomy,
-            ollama_model,
-            ollama_url,
-        )
+    # Las consultas a Ollama son independientes. Ejecutarlas concurrentemente
+    # evita esperar a que termine un parrafo antes de enviar el siguiente.
+    max_workers = min(4, len(selected_items))
+    classified_items: List[Optional[Dict[str, str]]] = [None] * len(selected_items)
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_index = {
+            executor.submit(
+                automated_labeling_columns,
+                paragraph,
+                law_taxonomy,
+                icom_taxonomy,
+                ollama_model,
+                ollama_url,
+            ): index
+            for index, paragraph in enumerate(selected_items)
+        }
+        for completed, future in enumerate(as_completed(future_to_index), start=1):
+            item_index = future_to_index[future]
+            classified_items[item_index] = future.result()
+            progress_text.write(
+                f"Clasificados {completed} de {len(selected_items)} parrafos "
+                f"con IA local ({max_workers} en paralelo)..."
+            )
+            progress_bar.progress(completed / len(selected_items))
+
+    for paragraph, norm_labels in zip(selected_items, classified_items):
+        if norm_labels is None:
+            continue
         master_rows.append(
             [
                 paragraph,
@@ -805,9 +825,8 @@ if process_clicked:
                 "etiqueta_final": norm_labels["etiqueta_final"],
             }
         )
-        progress_bar.progress(index / len(selected_items))
-
     progress_text.empty()
+    elapsed_seconds = time.perf_counter() - started_at
 
     master_excel_bytes = make_excel_bytes(
         master_rows,
@@ -830,7 +849,8 @@ if process_clicked:
     excel_mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     st.success(
         f"Archivo madre listo con {len(selected_items)} parrafos representativos "
-        f"(K optimo por codo = {elbow_summary['k_optimo']})."
+        f"(K optimo por codo = {elbow_summary['k_optimo']}) en "
+        f"{elapsed_seconds:.1f} segundos."
     )
     st.download_button(
         "Descargar archivo_madre_etiquetado.xlsx",
